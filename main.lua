@@ -3,6 +3,8 @@ local ConfirmBox = require("ui/widget/confirmbox")
 local Delivery = require("delivery")
 local DeviceActions = require("device_actions")
 local DeviceCollections = require("device_collections")
+local OpdsShelves = require("opds_shelves")
+local ShelfOrder = require("shelf_order")
 local Device = require("device")
 local Dispatcher = require("dispatcher")
 local Event = require("ui/event")
@@ -32,10 +34,10 @@ if G_reader_settings:hasNot("device_id") then
 end
 
 local CWNGSync = WidgetContainer:extend{
-    name = "cwngsync",
-    settings_key = "cwngsync",
+    name = "cwsync",
+    settings_key = "cwngsync", -- reuse upstream configuration/state
     title = _("Login to NextGen Server"),
-    version = "4.1.43",  -- Plugin version mirrors CWNG release tag; keep in lockstep with _meta.lua
+    version = "1.0.0",
 
     push_timestamp = nil,
     pull_timestamp = nil,
@@ -55,6 +57,7 @@ local SYNC_STRATEGY = {
 }
 
 local DELIVERY_RECEIPTS_KEY = "cwngsync_delivery_receipts"
+local BOOK_ID_CACHE_KEY = "cwsync_book_id_cache"
 
 
 -- Debounce push/pull attempts
@@ -226,7 +229,9 @@ function CWNGSync:onReaderReady()
     if self.settings.auto_sync then
         UIManager:nextTick(function()
             self:getProgress(true, false)
-            self:syncDeviceCapabilities(false, false)
+            -- collectDeliveries starts with a fresh inventory report and then
+            -- triggers collection sync, so ordered shelves see existing OPDS
+            -- downloads on the very first CWSync run.
             self:collectDeliveries(false, false)
         end)
     end
@@ -439,12 +444,23 @@ If set to 0, updating progress based on page turns will be disabled.]]),
                 separator = true,
             },
             {
+                text = _("Sync CWNG shelves to KOReader Collections now"),
+                enabled_func = function()
+                    return self.settings.password ~= nil
+                end,
+                callback = function()
+                    self:reportInventory(true, true, function(ok)
+                        if ok then self:syncDeviceCapabilities(true, false) end
+                    end)
+                end,
+                separator = true,
+            },
+            {
                 text = _("Collect books queued for this device now"),
                 enabled_func = function()
                     return self.settings.password ~= nil
                 end,
                 callback = function()
-                    self:syncDeviceCapabilities(true, true)
                     self:collectDeliveries(true, true)
                 end,
                 separator = true,
@@ -1013,6 +1029,152 @@ function CWNGSync:getStorageSpace(root_path)
     return math.floor(usable), math.floor(total)
 end
 
+local function collectionJoin(root, relative)
+    return root:gsub("/+$", "") .. "/" .. relative
+end
+
+function CWNGSync:fetchOrderedOpdsShelves(snapshot, client)
+    local socket_url = require("socket.url")
+    local index_url = self.settings.server:gsub("/+$", "") .. "/opds/shelfindex"
+    local xml, reason = client:fetch_opds(
+        self.settings.username, self.settings.password, index_url)
+    if not xml then
+        return nil, reason or "could not fetch OPDS shelf index"
+    end
+
+    local index = OpdsShelves.parseIndex(xml)
+    local shelves = {}
+    for _, entry in ipairs(index) do
+        local relevant = false
+        for _, collection in ipairs(snapshot.collections or {}) do
+            if ShelfOrder.namesCompatible(collection.name or "", entry.name or "") then
+                relevant = true
+                break
+            end
+        end
+        if relevant then
+            local next_url = socket_url.absolute(index_url, entry.href)
+            local seen_urls, book_ids = {}, {}
+            local complete = true
+            local page_count = 0
+            while next_url and not seen_urls[next_url] and page_count < 100 do
+                seen_urls[next_url] = true
+                page_count = page_count + 1
+                local page_xml, page_reason = client:fetch_opds(
+                    self.settings.username, self.settings.password, next_url)
+                if not page_xml then
+                    logger.warn("CWSync: OPDS shelf fetch failed", entry.name,
+                        page_reason or "unknown error")
+                    complete = false
+                    break
+                end
+                local page = OpdsShelves.parseShelfPage(page_xml)
+                for _, book_id in ipairs(page.book_ids or {}) do
+                    book_ids[#book_ids + 1] = book_id
+                end
+                next_url = page.next_href
+                    and socket_url.absolute(next_url, page.next_href) or nil
+            end
+            if next_url then
+                logger.warn("CWSync: OPDS pagination limit/loop reached", entry.name)
+                complete = false
+            end
+            if complete then
+                shelves[#shelves + 1] = {
+                    id = entry.id,
+                    name = entry.name,
+                    book_ids = book_ids,
+                }
+            end
+        end
+    end
+    return shelves
+end
+
+function CWNGSync:resolveCollectionBookIds(snapshot, root_path, client, callback)
+    local lpaths, seen = {}, {}
+    for _, collection in ipairs(snapshot.collections or {}) do
+        for _, lpath in ipairs(collection.books or {}) do
+            if type(lpath) == "string" and lpath ~= "" and not seen[lpath] then
+                seen[lpath] = true
+                lpaths[#lpaths + 1] = lpath
+            end
+        end
+    end
+
+    local cache = G_reader_settings:readSetting(BOOK_ID_CACHE_KEY) or {}
+    local resolved = {}
+    local index = 1
+
+    local function finish()
+        G_reader_settings:saveSetting(BOOK_ID_CACHE_KEY, cache)
+        if G_reader_settings.flush then
+            pcall(G_reader_settings.flush, G_reader_settings)
+        end
+        callback(resolved)
+    end
+
+    local function step()
+        if index > #lpaths then
+            finish()
+            return
+        end
+
+        local lpath = lpaths[index]
+        index = index + 1
+        local full_path = collectionJoin(root_path, lpath)
+        local ok, checksum = pcall(self.getDocumentDigest, self, full_path)
+        if not ok or not checksum then
+            logger.warn("CWSync: cannot identify collection book", lpath)
+            UIManager:nextTick(step)
+            return
+        end
+
+        local cached = tonumber(cache[checksum])
+        if cached then
+            resolved[lpath] = cached
+            UIManager:nextTick(step)
+            return
+        end
+
+        client:get_progress(
+            self.settings.username, self.settings.password, checksum,
+            function(request_ok, body)
+                local book_id = request_ok and type(body) == "table"
+                    and tonumber(body.calibre_book_id) or nil
+                if book_id then
+                    resolved[lpath] = book_id
+                    cache[checksum] = book_id
+                else
+                    logger.warn("CWSync: CWNG could not map collection book", lpath)
+                end
+                UIManager:nextTick(step)
+            end)
+    end
+
+    step()
+end
+
+function CWNGSync:buildOrderedCollectionSnapshot(snapshot, root_path, client, callback)
+    local shelves, reason = self:fetchOrderedOpdsShelves(snapshot, client)
+    if not shelves then
+        logger.warn("CWSync: falling back to server collection order",
+            reason or "OPDS shelf order unavailable")
+        callback(snapshot, {
+            matched = 0,
+            ambiguous = 0,
+            unresolved = #(snapshot.collections or {}),
+        })
+        return
+    end
+
+    self:resolveCollectionBookIds(snapshot, root_path, client, function(book_ids)
+        local ordered, stats = ShelfOrder.reorder(snapshot, shelves, book_ids)
+        logger.info("CWSync: ordered shelf reconciliation", stats)
+        callback(ordered, stats)
+    end)
+end
+
 function CWNGSync:syncDeviceCapabilities(interactive, ensure_networking)
     if not self.settings.username or not self.settings.password
             or not ensureServerConfigured(self.settings.server) then
@@ -1039,26 +1201,36 @@ function CWNGSync:syncDeviceCapabilities(interactive, ensure_networking)
                     logger.warn("CWNGSync: collection snapshot failed", reason or "unknown error")
                     return
                 end
-                local ReadCollection = require("readcollection")
-                local state = G_reader_settings:readSetting("cwngsync_collection_state") or {}
-                local applied, apply_reason = DeviceCollections.apply(
-                    snapshot, root_path, ReadCollection, state)
-                if not applied then
-                    logger.warn("CWNGSync: collection apply failed", apply_reason or "unknown error")
-                    return
-                end
-                G_reader_settings:saveSetting("cwngsync_collection_state", state)
-                if G_reader_settings.flush then
-                    pcall(G_reader_settings.flush, G_reader_settings)
-                end
-                client:complete_collections(
-                    self.settings.username, self.settings.password, Device.model,
-                    self.device_id, snapshot.revision,
-                    function(acknowledged, _body, ack_reason)
-                        if not acknowledged then
-                            logger.warn("CWNGSync: collection acknowledgement failed",
-                                ack_reason or "unknown error")
+
+                self:buildOrderedCollectionSnapshot(
+                    snapshot, root_path, client,
+                    function(snapshot_to_apply, order_stats)
+                        local ReadCollection = require("readcollection")
+                        local state = G_reader_settings:readSetting("cwngsync_collection_state") or {}
+                        local applied, apply_reason = DeviceCollections.apply(
+                            snapshot_to_apply, root_path, ReadCollection, state)
+                        if not applied then
+                            logger.warn("CWNGSync: collection apply failed",
+                                apply_reason or "unknown error")
+                            return
                         end
+                        G_reader_settings:saveSetting("cwngsync_collection_state", state)
+                        if G_reader_settings.flush then
+                            pcall(G_reader_settings.flush, G_reader_settings)
+                        end
+                        if order_stats and order_stats.matched and order_stats.matched > 0 then
+                            logger.info("CWSync: applied CWNG manual order to",
+                                order_stats.matched, "collection(s)")
+                        end
+                        client:complete_collections(
+                            self.settings.username, self.settings.password, Device.model,
+                            self.device_id, snapshot.revision,
+                            function(acknowledged, _body, ack_reason)
+                                if not acknowledged then
+                                    logger.warn("CWNGSync: collection acknowledgement failed",
+                                        ack_reason or "unknown error")
+                                end
+                            end)
                     end)
             end)
     end
@@ -1179,6 +1351,7 @@ function CWNGSync:collectDeliveries(
                 releaseCollection()
                 return
             end
+            self:syncDeviceCapabilities(false, false)
             self:collectDeliveries(
                 interactive, false, remaining, collected, true, collection_token)
         end)
