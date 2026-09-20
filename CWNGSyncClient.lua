@@ -429,6 +429,41 @@ local function responseHeader(headers, wanted)
     end
 end
 
+-- Fetch a small OPDS document with the same Basic credentials used by KOSync.
+-- CWNG's /api/v1 routes are session-authenticated, while OPDS deliberately
+-- supports HTTP Basic/app passwords, so OPDS is the stable source for shelf order.
+function CWNGSyncClient:fetch_opds(username, password, request_url)
+    local http = require("socket.http")
+    local ltn12 = require("ltn12")
+    local mime = require("mime")
+    local socket = require("socket")
+    local sink = {}
+    local credentials = mime.b64(username .. ":" .. password):gsub("%s", "")
+
+    socketutil:set_timeout(INVENTORY_TIMEOUTS[1], INVENTORY_TIMEOUTS[2])
+    local ok, code, headers, status = pcall(function()
+        return socket.skip(1, http.request {
+            url = request_url,
+            method = "GET",
+            headers = {
+                ["Accept"] = "application/atom+xml;profile=opds-catalog, application/atom+xml, */*",
+                ["Authorization"] = "Basic " .. credentials,
+                ["Accept-Encoding"] = "identity",
+            },
+            sink = ltn12.sink.table(sink),
+        })
+    end)
+    socketutil:reset_timeout()
+
+    if not ok then
+        return nil, describeFailure(code)
+    end
+    if code ~= 200 then
+        return nil, status or ("HTTP " .. tostring(code)), headers
+    end
+    return table.concat(sink), nil, headers
+end
+
 -- Book bytes intentionally use LuaSocket's file sink instead of Spore's JSON
 -- middleware: the latter buffers the complete body in memory. Claim and
 -- completion still travel through Spore and its double-declared wire contract.
