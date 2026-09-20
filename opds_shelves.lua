@@ -15,7 +15,7 @@ end
 
 local function attrs(text)
     local result = {}
-    for key, value in (text or ""):gmatch("([%w:_%-]+)%s*=%s*"([^"]*)"") do
+    for key, value in (text or ""):gmatch('([%w:_%-]+)%s*=%s*"([^"]*)"') do
         result[key] = unescape(value)
     end
     return result
