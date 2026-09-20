@@ -36,6 +36,14 @@ function Collections.apply(snapshot, root, read_collection, state)
             read_collection:removeCollection(previous.names[shelf.id])
         end
         read_collection:addCollection(name)
+        -- Native KOReader manual collection sorting is represented by a nil
+        -- collate setting plus each item's numeric order. addItem assigns that
+        -- order in insertion sequence, so the ordered snapshot becomes the
+        -- persistent manual order shown by KOReader/ZenOS.
+        if read_collection.coll_settings and read_collection.coll_settings[name] then
+            read_collection.coll_settings[name].collate = nil
+            read_collection.coll_settings[name].collate_reverse = nil
+        end
         updated[name] = true
         for _, lpath in ipairs(shelf.books) do
             if type(lpath) == "string" and lpath ~= "" and not lpath:find("..", 1, true)
