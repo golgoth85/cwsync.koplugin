@@ -5,6 +5,8 @@ It keeps the upstream synchronization features and adds preservation of the
 manual order of Calibre-Web NextGen shelves when they are materialized as
 native KOReader Collections.
 
+See [CHANGELOG.md](CHANGELOG.md) for release-by-release changes and compatibility notes.
+
 ## What it keeps from cwngsync
 
 - KOReader reading-progress synchronization
