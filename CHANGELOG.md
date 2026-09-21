@@ -11,6 +11,31 @@ and CWSync uses semantic versioning for its own releases.
 
 - Nothing yet.
 
+## [1.1.1] - 2026-09-21
+
+### Fixed
+
+- Removed full CWNG shelf reconciliation from KOReader `ReaderReady`, so opening
+  an EPUB/CBZ no longer waits behind a whole-library shelf scan and remote book
+  identity lookups.
+- Automatic shelf refresh is now scheduled after network connection, delayed
+  until the reader is usable, and limited to one run every 10 minutes.
+- Recently unresolved checksum-to-book mappings are negatively cached for 24
+  hours during automatic sync instead of issuing the same progress + annotation
+  requests on every refresh. Manual shelf/metadata sync bypasses that cooldown
+  and retries immediately.
+- Generated cover images (`.cover.jpg`, `.cover.png`, and other image formats)
+  are excluded from the device book inventory used for shelf reconciliation.
+  KOReader exposes image document providers, which previously caused those
+  assets to be treated as candidate CWNG books.
+
+### Changed
+
+- Manual **Sync CWNG shelves to KOReader Collections now** remains an immediate
+  full reconciliation and forces retry of previously unresolved books.
+- Reading-progress synchronization remains on the normal document-open path;
+  only library-wide shelf work was moved out of it.
+
 ## [1.1.0] - 2026-09-21
 
 ### Added
