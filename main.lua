@@ -233,9 +233,9 @@ function CWNGSync:onReaderReady()
             -- Shelf sync must work against the current stable CWNG server,
             -- which does not expose the post-4.1.43 device-inventory API.
             self:syncShelvesFromOpds(false, true)
-            -- Delivery collection is a newer server capability. Keep its existing
-            -- best-effort path separate so a missing endpoint cannot block shelves.
-            self:collectDeliveries(false, false)
+            -- Queued-book delivery is a newer server capability and remains a
+            -- manual action. Do not probe its inventory API on every ReaderReady
+            -- against stable servers that correctly answer 405 for that route.
         end)
     end
     -- NOTE: Keep in mind that, on Android, turning on WiFi requires a focus switch, which will trip a Suspend/Resume pair.
@@ -1001,9 +1001,15 @@ function CWNGSync:reportInventory(interactive, ensure_networking, on_complete)
             else
                 logger.warn("CWNGSync: device inventory report failed", reason or "unknown error")
                 if interactive then
+                    local message
+                    if tostring(reason or ""):find("405", 1, true) then
+                        message = _("This NextGen server does not support device inventory yet. Shelf sync works without it; queued-book delivery requires a newer NextGen server.")
+                    else
+                        message = T(_("Device library report failed: %1"), reason or _("unknown error"))
+                    end
                     UIManager:show(InfoMessage:new{
-                        text = T(_("Device library report failed: %1"), reason or _("unknown error")),
-                        timeout = 5,
+                        text = message,
+                        timeout = 6,
                     })
                 end
                 if on_complete then on_complete(false, body, reason) end
