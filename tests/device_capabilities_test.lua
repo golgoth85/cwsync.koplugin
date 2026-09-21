@@ -67,6 +67,9 @@ assert(not escaped,
     "a path escaping the library root must be refused before any remove() call")
 
 local fake = { collections = {}, coll_settings = {} }
+-- Real KOReader stores collection membership in ReadCollection.coll. Keep the
+-- friendlier test alias too so assertions remain readable.
+fake.coll = fake.collections
 function fake:addCollection(name)
     self.collections[name] = {}
     self.coll_settings[name] = { order = 1 }
