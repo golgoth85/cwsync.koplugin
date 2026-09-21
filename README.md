@@ -36,6 +36,12 @@ The shelf-sync path is:
 5. map local books to shelf membership in the exact OPDS/CWNG manual order;
 6. create or rebuild the native KOReader Collections with manual sorting.
 
+Automatic shelf reconciliation is deliberately kept out of KOReader's
+`ReaderReady` document-open path. It is scheduled after a network connection,
+delayed until the reader is usable, and coalesced so repeated book openings do
+not repeatedly scan/remap the entire library. The manual shelf-sync action
+always performs an immediate full refresh and retries unresolved books.
+
 No filename prefixes, fake series indexes, copied books, re-downloads, or
 server patch are required.
 
