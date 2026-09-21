@@ -42,6 +42,23 @@ jobs:
             zip -qr cwsync.koplugin.zip cwsync.koplugin
           )
 
+      - name: Extract release notes from changelog
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          awk -v version="$VERSION" '
+            index($0, "## [" version "] - ") == 1 { in_release=1; next }
+            in_release && /^## \[/ { exit }
+            in_release { print }
+          ' CHANGELOG.md > RELEASE_NOTES.md
+
+          if ! grep -q '[^[:space:]]' RELEASE_NOTES.md; then
+            echo "CHANGELOG.md has no release section for $VERSION" >&2
+            exit 1
+          fi
+
       - name: Create GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -51,13 +68,14 @@ jobs:
         run: |
           set -euo pipefail
           if gh release view "$TAG" >/dev/null 2>&1; then
-            echo "Release $TAG already exists; nothing to publish."
+            echo "Release $TAG already exists; refreshing notes from CHANGELOG.md."
+            gh release edit "$TAG" --notes-file RELEASE_NOTES.md
             exit 0
           fi
           gh release create "$TAG" dist/cwsync.koplugin.zip \
             --target "${GITHUB_SHA}" \
             --title "CWSync $VERSION" \
-            --notes "CWSync $VERSION for KOReader. Preserves Calibre-Web NextGen shelf order in native KOReader Collections, including books already present from OPDS downloads."
+            --notes-file RELEASE_NOTES.md
 
       - name: Try to add Storefront discovery topic
         continue-on-error: true
