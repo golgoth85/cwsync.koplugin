@@ -38,7 +38,7 @@ local CWNGSync = WidgetContainer:extend{
     name = "cwsync",
     settings_key = "cwngsync", -- reuse upstream configuration/state
     title = _("Login to NextGen Server"),
-    version = "1.0.2",
+    version = "1.0.3",
 
     push_timestamp = nil,
     pull_timestamp = nil,
