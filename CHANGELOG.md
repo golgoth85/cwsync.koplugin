@@ -11,6 +11,29 @@ and CWSync uses semantic versioning for its own releases.
 
 - Nothing yet.
 
+## [1.0.3] - 2026-09-21
+
+### Changed
+
+- Native KOReader Collection names now match their CWNG shelf names exactly.
+  The automatic `[CWNG xxxx]` account suffix is no longer shown.
+- Account scoping remains internal to CWSync state rather than being encoded in
+  the visible Collection name.
+- Existing CWSync Collections created by 1.0.0-1.0.2 with a
+  `[CWNG xxxx]` suffix are migrated to the clean shelf name on the next
+  successful shelf sync.
+
+### Fixed
+
+- Added preflight collision protection before changing KOReader Collections.
+  CWSync now refuses to overwrite an existing unmanaged KOReader Collection or
+  silently merge same-name Collections from different CWNG accounts.
+- Duplicate same-name shelves within one CWNG account are rejected explicitly
+  because KOReader cannot represent them as two distinct native Collections
+  without changing their visible names.
+- Shelf-name swaps are applied safely by removing the previous managed names
+  before creating the replacement Collections.
+
 ## [1.0.2] - 2026-09-21
 
 ### Fixed
@@ -110,7 +133,8 @@ and CWSync uses semantic versioning for its own releases.
 Both issues were fixed in 1.0.1, with the remaining automatic inventory probe
 removed in 1.0.2.
 
-[Unreleased]: https://github.com/golgoth85/cwsync.koplugin/compare/v1.0.2...HEAD
+[Unreleased]: https://github.com/golgoth85/cwsync.koplugin/compare/v1.0.3...HEAD
+[1.0.3]: https://github.com/golgoth85/cwsync.koplugin/compare/v1.0.2...v1.0.3
 [1.0.2]: https://github.com/golgoth85/cwsync.koplugin/compare/v1.0.1...v1.0.2
 [1.0.1]: https://github.com/golgoth85/cwsync.koplugin/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/golgoth85/cwsync.koplugin/releases/tag/v1.0.0
