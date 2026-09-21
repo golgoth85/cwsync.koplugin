@@ -91,6 +91,12 @@ Each shelf sync rebuilds the managed KOReader Collection from the current OPDS
 state. Local manual reordering of a CWSync-managed Collection can therefore be
 overwritten by the next sync.
 
+The visible KOReader Collection name is exactly the CWNG shelf name. CWSync
+keeps account scope internally and does not append an account identifier. If a
+same-name unmanaged KOReader Collection, another CWSync account, or duplicate
+same-name CWNG shelves would collide, the sync is refused rather than merging
+or overwriting Collections.
+
 Only locally present books whose checksum CWNG can resolve are inserted. A book
 may belong to multiple Collections without duplicating the underlying file.
 Shelves removed from CWNG are removed from the set of CWSync-managed
@@ -105,7 +111,7 @@ The initial imported plugin code came from:
 - upstream subtree: `koreader/plugins/cwngsync.koplugin/`
 
 That upstream commit was on `main` after the released 4.1.43 server commit and
-already contained newer device-capability APIs. CWSync 1.0.2 explicitly removes
+already contained newer device-capability APIs. CWSync 1.0.3 explicitly removes
 those unreleased APIs from the shelf-sync dependency chain so it interoperates
 with the actual 4.1.43 release.
 
