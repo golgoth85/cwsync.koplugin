@@ -11,6 +11,38 @@ and CWSync uses semantic versioning for its own releases.
 
 - Nothing yet.
 
+## [1.1.0] - 2026-09-21
+
+### Added
+
+- Optional synchronization of CWNG book metadata into KOReader custom metadata
+  sidecars without replacing or re-downloading the local book file.
+- Manual **Sync CWNG book metadata now** action.
+- Optional **Sync CWNG book metadata with shelves** toggle so the normal shelf
+  refresh can also keep metadata current.
+- OPDS metadata parsing for title, authors, series, series index, language,
+  tags/keywords and description.
+- Metadata ownership tracking per book and field.
+
+### Changed
+
+- CWNG OPDS is also the authoritative metadata source for fields CWSync manages.
+- Existing KOReader custom metadata is treated as user-owned and is not adopted
+  or overwritten by default.
+- When CWSync previously wrote a field, later CWNG edits are propagated only
+  while the local value still matches the last CWSync-written value.
+- A manual KOReader edit to a CWSync-managed field automatically makes that
+  field user-owned; subsequent metadata syncs leave it untouched.
+- Metadata cache invalidation and KOReader metadata-change events are emitted
+  after successful updates so browser/reader views can refresh without changing
+  the underlying EPUB/PDF.
+
+### Compatibility
+
+- Metadata sync uses the OPDS catalog and checksum-to-`calibre_book_id`
+  resolution already available in CWNG 4.1.43.
+- Cover synchronization is intentionally not included in this release.
+
 ## [1.0.3] - 2026-09-21
 
 ### Changed
@@ -133,7 +165,8 @@ and CWSync uses semantic versioning for its own releases.
 Both issues were fixed in 1.0.1, with the remaining automatic inventory probe
 removed in 1.0.2.
 
-[Unreleased]: https://github.com/golgoth85/cwsync.koplugin/compare/v1.0.3...HEAD
+[Unreleased]: https://github.com/golgoth85/cwsync.koplugin/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/golgoth85/cwsync.koplugin/compare/v1.0.3...v1.1.0
 [1.0.3]: https://github.com/golgoth85/cwsync.koplugin/compare/v1.0.2...v1.0.3
 [1.0.2]: https://github.com/golgoth85/cwsync.koplugin/compare/v1.0.1...v1.0.2
 [1.0.1]: https://github.com/golgoth85/cwsync.koplugin/compare/v1.0.0...v1.0.1

@@ -3,6 +3,8 @@ local ConfirmBox = require("ui/widget/confirmbox")
 local Delivery = require("delivery")
 local DeviceActions = require("device_actions")
 local DeviceCollections = require("device_collections")
+local MetadataMerge = require("metadata_merge")
+local OpdsMetadata = require("opds_metadata")
 local OpdsShelves = require("opds_shelves")
 local OpdsCollectionSnapshot = require("opds_collection_snapshot")
 local ShelfOrder = require("shelf_order")
@@ -38,7 +40,7 @@ local CWNGSync = WidgetContainer:extend{
     name = "cwsync",
     settings_key = "cwngsync", -- reuse upstream configuration/state
     title = _("Login to NextGen Server"),
-    version = "1.0.3",
+    version = "1.1.0",
 
     push_timestamp = nil,
     pull_timestamp = nil,
@@ -78,6 +80,9 @@ CWNGSync.default_settings = {
     -- Highlight sync writes into the device's KoboReader.sqlite — opt-in,
     -- default off until the user explicitly enables it (Kobo only).
     sync_annotations = false,
+    -- Metadata sync writes KOReader custom metadata sidecars. Keep it opt-in
+    -- because pre-existing local custom fields are user-owned by default.
+    sync_metadata = false,
 }
 
 function CWNGSync:init()
@@ -453,6 +458,29 @@ If set to 0, updating progress based on page turns will be disabled.]]),
                 end,
                 callback = function()
                     self:syncShelvesFromOpds(true, true)
+                end,
+            },
+            {
+                text = _("Sync CWNG book metadata with shelves"),
+                help_text = _([[When enabled, shelf sync also refreshes title, authors, series, language, tags and description from Calibre-Web NextGen. Existing KOReader custom fields are preserved unless CWSync created and still owns that field.]]),
+                checked_func = function()
+                    return self.settings.sync_metadata == true
+                end,
+                callback = function()
+                    self.settings.sync_metadata = not (self.settings.sync_metadata == true)
+                    G_reader_settings:saveSetting(self.settings_key, self.settings)
+                    if G_reader_settings.flush then
+                        pcall(G_reader_settings.flush, G_reader_settings)
+                    end
+                end,
+            },
+            {
+                text = _("Sync CWNG book metadata now"),
+                enabled_func = function()
+                    return self.settings.password ~= nil
+                end,
+                callback = function()
+                    self:syncBookMetadata(true, true)
                 end,
                 separator = true,
             },
@@ -1206,6 +1234,272 @@ function CWNGSync:buildOrderedCollectionSnapshot(snapshot, root_path, client, ca
     end)
 end
 
+local CWSYNC_METADATA_STATE_KEY = "cwsync_metadata"
+
+function CWNGSync:fetchOpdsBookMetadata(book_ids, client)
+    local wanted, remaining = {}, 0
+    for _, book_id in pairs(book_ids or {}) do
+        book_id = tonumber(book_id)
+        if book_id and not wanted[book_id] then
+            wanted[book_id] = true
+            remaining = remaining + 1
+        end
+    end
+    if remaining == 0 then return {}, nil end
+
+    local socket_url = require("socket.url")
+    local next_url = self.settings.server:gsub("/+$", "") .. "/opds/books/letter/00"
+    local seen_urls, found = {}, {}
+    local pages = 0
+
+    while next_url and not seen_urls[next_url] and pages < 1000 and remaining > 0 do
+        seen_urls[next_url] = true
+        pages = pages + 1
+        local xml, reason = client:fetch_opds(
+            self.settings.username, self.settings.password, next_url)
+        if not xml then
+            return nil, reason or "could not fetch OPDS book catalog"
+        end
+
+        local page = OpdsMetadata.parseBookPage(xml)
+        for _, record in ipairs(page.books or {}) do
+            local book_id = tonumber(record.book_id)
+            if book_id and wanted[book_id] and not found[book_id] then
+                found[book_id] = record
+                remaining = remaining - 1
+            end
+        end
+        next_url = page.next_href
+            and socket_url.absolute(next_url, page.next_href) or nil
+    end
+
+    if next_url and pages >= 1000 then
+        logger.warn("CWSync: OPDS metadata pagination limit reached")
+    elseif next_url and seen_urls[next_url] then
+        logger.warn("CWSync: OPDS metadata pagination loop detected", next_url)
+    end
+    return found, nil
+end
+
+local function readOriginalDocProps(full_path)
+    local DocSettings = require("docsettings")
+    local sidecar = DocSettings:findSidecarFile(full_path)
+    if sidecar then
+        local ok, settings = pcall(DocSettings.open, DocSettings, full_path)
+        if ok and settings then
+            local props = settings:readSetting("doc_props")
+            if type(props) == "table" then return props end
+        end
+    end
+
+    -- A never-opened book has no KOReader doc_props yet. Read only document
+    -- metadata once so "Reset custom" can still restore the file's original
+    -- values after CWSync creates a custom_metadata.lua sidecar.
+    local ok_registry, DocumentRegistry = pcall(require, "document/documentregistry")
+    if not ok_registry or not DocumentRegistry or not DocumentRegistry.hasProvider
+            or not DocumentRegistry:hasProvider(full_path) then
+        return {}
+    end
+    local ok_open, document = pcall(function()
+        return DocumentRegistry:openDocument(full_path)
+    end)
+    if not ok_open or not document then return {} end
+
+    local loaded = true
+    if document.loadDocument then
+        local ok_load, result = pcall(document.loadDocument, document, false)
+        loaded = ok_load and result ~= false
+    end
+    local props = {}
+    if loaded and document.getProps then
+        local ok_props, value = pcall(document.getProps, document)
+        if ok_props and type(value) == "table" then props = value end
+    end
+    if document.close then pcall(document.close, document) end
+    return props
+end
+
+function CWNGSync:applyBookMetadata(full_path, book_id, record)
+    local DocSettings = require("docsettings")
+    local custom_file = DocSettings:findCustomMetadataFile(full_path)
+    local settings = custom_file
+        and DocSettings.openSettingsFile(custom_file)
+        or DocSettings.openSettingsFile()
+
+    local custom_props = settings:readSetting("custom_props", {}) or {}
+    local state = settings:readSetting(CWSYNC_METADATA_STATE_KEY, {}) or {}
+    local managed = {}
+    if tonumber(state.book_id) == tonumber(book_id) and type(state.props) == "table" then
+        managed = state.props
+    end
+
+    local incoming = MetadataMerge.propsFromRecord(record)
+    local before = {}
+    for _, prop in ipairs(MetadataMerge.PROPS) do before[prop] = custom_props[prop] end
+    local merged, next_managed, stats = MetadataMerge.plan(
+        custom_props, managed, incoming)
+
+    if stats.written == 0 and stats.relinquished == 0 then
+        return true, stats
+    end
+
+    if not custom_file and settings:readSetting("doc_props") == nil then
+        settings:saveSetting("doc_props", readOriginalDocProps(full_path))
+    end
+    settings:saveSetting("custom_props", merged)
+    settings:saveSetting(CWSYNC_METADATA_STATE_KEY, {
+        version = 1,
+        book_id = tonumber(book_id),
+        props = next_managed,
+        server_updated = record.updated or "",
+    })
+
+    if not settings:flushCustomMetadata(full_path) then
+        return false, "could not write KOReader custom metadata"
+    end
+
+    local changed_props = {}
+    for _, prop in ipairs(MetadataMerge.PROPS) do
+        if before[prop] ~= merged[prop] then changed_props[#changed_props + 1] = prop end
+    end
+    if #changed_props > 0 then
+        UIManager:broadcastEvent(Event:new("InvalidateMetadataCache", full_path))
+
+        -- Keep an already-open document coherent with the newly written custom
+        -- metadata. Other books will read the sidecar on next display/open.
+        if self.ui and self.ui.document and self.ui.document.file == full_path
+                and type(self.ui.doc_props) == "table" then
+            if self.ui.doc_settings and self.ui.doc_settings.getCustomMetadataFile then
+                self.ui.doc_settings:getCustomMetadataFile(true)
+            end
+            for _, prop in ipairs(changed_props) do
+                local old_value = self.ui.doc_props[prop]
+                self.ui.doc_props[prop] = merged[prop]
+                UIManager:broadcastEvent(Event:new("BookMetadataChanged", {
+                    filepath = full_path,
+                    doc_props = self.ui.doc_props,
+                    metadata_key_updated = prop,
+                    metadata_value_old = old_value,
+                }))
+            end
+        else
+            UIManager:broadcastEvent(Event:new("BookMetadataChanged", {
+                filepath = full_path,
+            }))
+        end
+    end
+
+    return true, stats
+end
+
+function CWNGSync:applyResolvedBookMetadata(
+        lpaths, root_path, client, book_ids, interactive, callback)
+    local records, reason = self:fetchOpdsBookMetadata(book_ids, client)
+    if not records then
+        logger.warn("CWSync: OPDS metadata fetch failed", reason or "unknown error")
+        if interactive then
+            UIManager:show(InfoMessage:new{
+                text = T(_("Metadata sync failed: %1"), reason or _("unknown error")),
+                timeout = 5,
+            })
+        end
+        if callback then callback(false, nil, reason) end
+        return
+    end
+
+    local stats = {
+        local_books = #lpaths,
+        mapped = 0,
+        metadata_found = 0,
+        books_updated = 0,
+        fields_written = 0,
+        protected_fields = 0,
+        missing_metadata = 0,
+        write_failures = 0,
+    }
+
+    for _, lpath in ipairs(lpaths) do
+        local book_id = tonumber(book_ids[lpath])
+        if book_id then
+            stats.mapped = stats.mapped + 1
+            local record = records[book_id]
+            if record then
+                stats.metadata_found = stats.metadata_found + 1
+                local ok, result = self:applyBookMetadata(
+                    collectionJoin(root_path, lpath), book_id, record)
+                if ok then
+                    local changed = result.written or 0
+                    stats.fields_written = stats.fields_written + changed
+                    stats.protected_fields = stats.protected_fields
+                        + (result.skipped_unmanaged or 0)
+                        + (result.relinquished or 0)
+                    if changed > 0 then
+                        stats.books_updated = stats.books_updated + 1
+                    end
+                else
+                    stats.write_failures = stats.write_failures + 1
+                    logger.warn("CWSync: metadata write failed", lpath, result)
+                end
+            else
+                stats.missing_metadata = stats.missing_metadata + 1
+            end
+        end
+    end
+
+    logger.info("CWSync: book metadata sync complete", stats)
+    if interactive then
+        UIManager:show(InfoMessage:new{
+            text = T(_("Metadata synced: %1 books updated, %2 fields written, %3 local custom fields protected."),
+                stats.books_updated, stats.fields_written, stats.protected_fields),
+            timeout = 6,
+        })
+    end
+    if callback then callback(true, stats) end
+end
+
+function CWNGSync:syncBookMetadata(interactive, ensure_networking)
+    if not self.settings.username or not self.settings.password then
+        if interactive then promptLogin() end
+        return
+    end
+    if not ensureServerConfigured(self.settings.server) then return end
+    if ensure_networking and NetworkMgr:willRerunWhenOnline(function()
+            self:syncBookMetadata(interactive, ensure_networking)
+        end) then
+        return
+    end
+
+    local paths, root_path = self:getInventoryBooks()
+    if not root_path then
+        if interactive then
+            UIManager:show(InfoMessage:new{
+                text = _("Choose a device library folder before syncing metadata."),
+                timeout = 4,
+            })
+        end
+        return
+    end
+
+    local lpaths, seen = {}, {}
+    for _, file_path in ipairs(paths) do
+        local lpath = inventoryRelativePath(file_path, root_path)
+        if lpath and not seen[lpath] then
+            seen[lpath] = true
+            lpaths[#lpaths + 1] = lpath
+        end
+    end
+
+    local CWNGSyncClient = require("CWNGSyncClient")
+    local client = CWNGSyncClient:new{
+        service_url = self.settings.server .. "/kosync",
+        service_spec = self.path .. "/api.json",
+    }
+    self:resolveBookIdsForLpaths(lpaths, root_path, client, function(book_ids)
+        self:applyResolvedBookMetadata(
+            lpaths, root_path, client, book_ids, interactive)
+    end)
+end
+
 function CWNGSync:syncShelvesFromOpds(interactive, ensure_networking)
     if not self.settings.username or not self.settings.password then
         if interactive then promptLogin() end
@@ -1289,12 +1583,32 @@ function CWNGSync:syncShelvesFromOpds(interactive, ensure_networking)
             pcall(G_reader_settings.flush, G_reader_settings)
         end
         logger.info("CWSync: OPDS shelves applied", stats)
-        if interactive then
-            UIManager:show(InfoMessage:new{
-                text = T(_("Shelves synced: %1 collections, %2 local books matched."),
-                    stats.collections or 0, stats.books or 0),
-                timeout = 5,
-            })
+
+        local function finishShelfSync(metadata_stats)
+            if interactive then
+                local text = T(_("Shelves synced: %1 collections, %2 local books matched."),
+                    stats.collections or 0, stats.books or 0)
+                if metadata_stats then
+                    text = text .. "\n" .. T(
+                        _("Metadata: %1 books updated, %2 local custom fields protected."),
+                        metadata_stats.books_updated or 0,
+                        metadata_stats.protected_fields or 0)
+                end
+                UIManager:show(InfoMessage:new{
+                    text = text,
+                    timeout = metadata_stats and 7 or 5,
+                })
+            end
+        end
+
+        if self.settings.sync_metadata == true then
+            self:applyResolvedBookMetadata(
+                lpaths, root_path, client, book_ids, false,
+                function(_ok, metadata_stats)
+                    finishShelfSync(metadata_stats)
+                end)
+        else
+            finishShelfSync()
         end
     end)
 end

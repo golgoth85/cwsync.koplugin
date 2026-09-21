@@ -21,6 +21,8 @@ jobs:
         run: |
           lua5.1 shelf_order_test.lua
           lua5.1 opds_collection_snapshot_test.lua
+          lua5.1 opds_metadata_test.lua
+          lua5.1 metadata_merge_test.lua
           lua5.1 migration_test.lua
           lua5.1 sync_logic_test.lua
           lua5.1 delivery_test.lua

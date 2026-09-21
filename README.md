@@ -39,6 +39,34 @@ The shelf-sync path is:
 No filename prefixes, fake series indexes, copied books, re-downloads, or
 server patch are required.
 
+## Book metadata synchronization
+
+CWSync can synchronize CWNG metadata for books that already exist on the
+device, without replacing or re-downloading the EPUB/PDF.
+
+Supported fields are:
+
+- title
+- authors
+- series and series index
+- language
+- tags/keywords
+- description
+
+Use **Sync CWNG book metadata now** for an explicit refresh. Enable
+**Sync CWNG book metadata with shelves** if you also want every normal shelf
+sync to refresh metadata automatically. Automatic metadata sync is off by
+default.
+
+CWSync writes KOReader's native `custom_metadata.lua` sidecar, so the original
+book bytes and reading-progress sidecar remain untouched. Existing KOReader
+custom fields are considered user-owned and are preserved. For fields CWSync
+created itself, later CWNG changes continue to propagate until you edit that
+field manually in KOReader; a local manual edit causes CWSync to relinquish
+ownership of that field instead of overwriting it on the next sync.
+
+Cover synchronization is not part of this release.
+
 ## Existing OPDS downloads
 
 Existing books are supported. A book does **not** need to have been downloaded
