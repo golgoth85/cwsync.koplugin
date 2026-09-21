@@ -38,7 +38,7 @@ local CWNGSync = WidgetContainer:extend{
     name = "cwsync",
     settings_key = "cwngsync", -- reuse upstream configuration/state
     title = _("Login to NextGen Server"),
-    version = "1.0.1",
+    version = "1.0.2",
 
     push_timestamp = nil,
     pull_timestamp = nil,
@@ -2289,9 +2289,11 @@ end
 function CWNGSync:_onNetworkConnected()
     logger.dbg("CWNGSync: onNetworkConnected")
     UIManager:scheduleIn(0.5, function()
-        -- Network is supposed to be on already, don't wrap this in willRerunWhenOnline
+        -- Network is supposed to be on already, don't wrap this in willRerunWhenOnline.
+        -- Shelf sync is supported by stable CWNG 4.1.43; queued-book delivery
+        -- requires newer server capability endpoints and remains a manual action.
         self:getProgress(false, false)
-        self:collectDeliveries(false, false)
+        self:syncShelvesFromOpds(false, false)
     end)
 end
 

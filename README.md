@@ -103,7 +103,7 @@ The initial imported plugin code came from:
 - upstream subtree: `koreader/plugins/cwngsync.koplugin/`
 
 That upstream commit was on `main` after the released 4.1.43 server commit and
-already contained newer device-capability APIs. CWSync 1.0.1 explicitly removes
+already contained newer device-capability APIs. CWSync 1.0.2 explicitly removes
 those unreleased APIs from the shelf-sync dependency chain so it interoperates
 with the actual 4.1.43 release.
 
