@@ -40,7 +40,7 @@ local CWNGSync = WidgetContainer:extend{
     name = "cwsync",
     settings_key = "cwngsync", -- reuse upstream configuration/state
     title = _("Login to NextGen Server"),
-    version = "1.1.0",
+    version = "1.1.1",
 
     push_timestamp = nil,
     pull_timestamp = nil,
@@ -49,6 +49,9 @@ local CWNGSync = WidgetContainer:extend{
     last_page_turn_timestamp = nil,
     periodic_push_task = nil,
     periodic_push_scheduled = nil,
+    auto_shelf_sync_task = nil,
+    auto_shelf_sync_scheduled = nil,
+    last_auto_shelf_sync_at = nil,
 
     settings = nil,
 }
@@ -61,6 +64,13 @@ local SYNC_STRATEGY = {
 
 local DELIVERY_RECEIPTS_KEY = "cwngsync_delivery_receipts"
 local BOOK_ID_CACHE_KEY = "cwsync_book_id_cache"
+local BOOK_ID_MISS_CACHE_KEY = "cwsync_book_id_miss_cache"
+
+-- Shelf reconciliation is library-wide work. Never put it on the document-open
+-- critical path, and coalesce repeated network/reader events into one refresh.
+local AUTO_SHELF_SYNC_DELAY = 15
+local AUTO_SHELF_SYNC_MIN_INTERVAL = 10 * 60
+local BOOK_ID_MISS_RETRY_INTERVAL = 24 * 60 * 60
 
 
 -- Debounce push/pull attempts
@@ -104,6 +114,8 @@ function CWNGSync:init()
     self.last_page = -1
     self.last_page_turn_timestamp = 0
     self.periodic_push_scheduled = false
+    self.auto_shelf_sync_scheduled = false
+    self.last_auto_shelf_sync_at = 0
 
     -- Like AutoSuspend, we need an instance-specific task for scheduling/resource management reasons.
     self.periodic_push_task = function()
@@ -111,6 +123,11 @@ function CWNGSync:init()
         self.page_update_counter = 0
         -- We do *NOT* want to make sure networking is up here, as the nagging would be extremely annoying; we're leaving that to the network activity check...
         self:updateProgress(false, false)
+    end
+
+    self.auto_shelf_sync_task = function()
+        self.auto_shelf_sync_scheduled = false
+        self:syncShelvesFromOpds(false, false)
     end
 
     local migrated_settings = Migration.migrateSettings(G_reader_settings)
@@ -235,9 +252,12 @@ function CWNGSync:onReaderReady()
     if self.settings.auto_sync then
         UIManager:nextTick(function()
             self:getProgress(true, false)
-            -- Shelf sync must work against the current stable CWNG server,
-            -- which does not expose the post-4.1.43 device-inventory API.
-            self:syncShelvesFromOpds(false, true)
+            -- Shelf reconciliation is deliberately NOT started from ReaderReady.
+            -- It scans the whole library and may need remote identity lookups;
+            -- doing that while KOReader is still opening a document made every
+            -- EPUB/CBZ open wait behind unrelated shelf work. NetworkConnected
+            -- schedules a coalesced background refresh instead, and the manual
+            -- menu action remains available for an immediate full refresh.
             -- Queued-book delivery is a newer server capability and remains a
             -- manual action. Do not probe its inventory API on every ReaderReady
             -- against stable servers that correctly answer 405 for that route.
@@ -911,6 +931,22 @@ function CWNGSync:getLibraryBooksForSync()
     return paths, true, root_path
 end
 
+local function isInventoryDocumentPath(path)
+    if type(path) ~= "string" then return false end
+    local lower = path:lower()
+    -- KOReader has image document providers, so DocumentRegistry:hasProvider()
+    -- alone also accepts generated cover assets such as .cover.jpg. They can
+    -- never represent a CWNG book and must not enter checksum/remote mapping.
+    if lower:match("/%.?cover%.[^/]+$") then return false end
+    local ext = lower:match("%.([^.//]+)$")
+    if ext == "jpg" or ext == "jpeg" or ext == "png" or ext == "gif"
+            or ext == "webp" or ext == "bmp" or ext == "tif"
+            or ext == "tiff" or ext == "svg" then
+        return false
+    end
+    return true
+end
+
 local function inventoryRelativePath(path, root_path)
     if root_path and path:sub(1, #root_path) == root_path
             and (root_path:sub(-1) == "/"
@@ -942,7 +978,7 @@ function CWNGSync:getInventoryBooks()
     local paths = {}
     local seen = {}
     util.findFiles(root_path, function(path)
-        if seen[path] then
+        if seen[path] or not isInventoryDocumentPath(path) then
             return
         end
         if document_registry_ok and DocumentRegistry and DocumentRegistry.hasProvider then
@@ -1129,13 +1165,15 @@ function CWNGSync:fetchOrderedOpdsShelves(snapshot, client)
     return shelves
 end
 
-function CWNGSync:resolveBookIdsForLpaths(lpaths, root_path, client, callback)
+function CWNGSync:resolveBookIdsForLpaths(lpaths, root_path, client, callback, retry_misses)
     local cache = G_reader_settings:readSetting(BOOK_ID_CACHE_KEY) or {}
+    local miss_cache = G_reader_settings:readSetting(BOOK_ID_MISS_CACHE_KEY) or {}
     local resolved = {}
     local index = 1
 
     local function finish()
         G_reader_settings:saveSetting(BOOK_ID_CACHE_KEY, cache)
+        G_reader_settings:saveSetting(BOOK_ID_MISS_CACHE_KEY, miss_cache)
         if G_reader_settings.flush then
             pcall(G_reader_settings.flush, G_reader_settings)
         end
@@ -1147,6 +1185,7 @@ function CWNGSync:resolveBookIdsForLpaths(lpaths, root_path, client, callback)
         if book_id then
             resolved[lpath] = book_id
             cache[checksum] = book_id
+            miss_cache[checksum] = nil
             return true
         end
         return false
@@ -1175,6 +1214,14 @@ function CWNGSync:resolveBookIdsForLpaths(lpaths, root_path, client, callback)
             return
         end
 
+        local missed_at = tonumber(miss_cache[checksum])
+        if not retry_misses and missed_at
+                and os.time() - missed_at < BOOK_ID_MISS_RETRY_INTERVAL then
+            logger.dbg("CWSync: skipping recently unmapped collection book", lpath)
+            UIManager:nextTick(step)
+            return
+        end
+
         -- Progress GET is the cheapest resolver and carries calibre_book_id when
         -- a position exists. CWNG 4.1.43 returns an empty object for a matched
         -- book with no progress, so fall back to the read-only annotations GET:
@@ -1191,6 +1238,7 @@ function CWNGSync:resolveBookIdsForLpaths(lpaths, root_path, client, callback)
                     self.settings.username, self.settings.password, checksum,
                     function(annotation_ok, annotation_body)
                         if not (annotation_ok and remember(lpath, checksum, annotation_body)) then
+                            miss_cache[checksum] = os.time()
                             logger.warn("CWSync: CWNG could not map collection book", lpath)
                         end
                         UIManager:nextTick(step)
@@ -1497,7 +1545,7 @@ function CWNGSync:syncBookMetadata(interactive, ensure_networking)
     self:resolveBookIdsForLpaths(lpaths, root_path, client, function(book_ids)
         self:applyResolvedBookMetadata(
             lpaths, root_path, client, book_ids, interactive)
-    end)
+    end, interactive == true)
 end
 
 function CWNGSync:syncShelvesFromOpds(interactive, ensure_networking)
@@ -1510,6 +1558,20 @@ function CWNGSync:syncShelvesFromOpds(interactive, ensure_networking)
             self:syncShelvesFromOpds(interactive, ensure_networking)
         end) then
         return
+    end
+
+    -- Automatic shelf sync is library-wide work. Coalesce repeated triggers
+    -- (ReaderReady/NetworkConnected/resume) so opening several books cannot
+    -- repeatedly rescan and remap the same library. Manual sync always bypasses
+    -- this guard and also retries recently-unmapped books.
+    if not interactive then
+        local now = os.time()
+        if self.last_auto_shelf_sync_at > 0
+                and now - self.last_auto_shelf_sync_at < AUTO_SHELF_SYNC_MIN_INTERVAL then
+            logger.dbg("CWSync: automatic shelf sync skipped by cooldown")
+            return
+        end
+        self.last_auto_shelf_sync_at = now
     end
 
     local paths, root_path = self:getInventoryBooks()
@@ -1610,7 +1672,7 @@ function CWNGSync:syncShelvesFromOpds(interactive, ensure_networking)
         else
             finishShelfSync()
         end
-    end)
+    end, interactive == true)
 end
 
 function CWNGSync:syncDeviceCapabilities(interactive, ensure_networking)
@@ -2600,14 +2662,27 @@ function CWNGSync:_onSuspend()
     self:updateProgress(true, false, true)
 end
 
+function CWNGSync:scheduleAutoShelfSync()
+    local now = os.time()
+    if self.last_auto_shelf_sync_at > 0
+            and now - self.last_auto_shelf_sync_at < AUTO_SHELF_SYNC_MIN_INTERVAL then
+        return
+    end
+    if self.auto_shelf_sync_scheduled then
+        UIManager:unschedule(self.auto_shelf_sync_task)
+    end
+    self.auto_shelf_sync_scheduled = true
+    UIManager:scheduleIn(AUTO_SHELF_SYNC_DELAY, self.auto_shelf_sync_task)
+end
+
 function CWNGSync:_onNetworkConnected()
     logger.dbg("CWNGSync: onNetworkConnected")
     UIManager:scheduleIn(0.5, function()
         -- Network is supposed to be on already, don't wrap this in willRerunWhenOnline.
-        -- Shelf sync is supported by stable CWNG 4.1.43; queued-book delivery
-        -- requires newer server capability endpoints and remains a manual action.
         self:getProgress(false, false)
-        self:syncShelvesFromOpds(false, false)
+        -- Shelf reconciliation is intentionally delayed until the reader is
+        -- usable, then debounced/cooldown-limited by scheduleAutoShelfSync().
+        self:scheduleAutoShelfSync()
     end)
 end
 
@@ -2803,7 +2878,9 @@ end
 
 function CWNGSync:onCloseWidget()
     UIManager:unschedule(self.periodic_push_task)
+    UIManager:unschedule(self.auto_shelf_sync_task)
     self.periodic_push_task = nil
+    self.auto_shelf_sync_task = nil
 end
 
 return CWNGSync
