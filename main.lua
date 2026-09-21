@@ -4,6 +4,7 @@ local Delivery = require("delivery")
 local DeviceActions = require("device_actions")
 local DeviceCollections = require("device_collections")
 local OpdsShelves = require("opds_shelves")
+local OpdsCollectionSnapshot = require("opds_collection_snapshot")
 local ShelfOrder = require("shelf_order")
 local Device = require("device")
 local Dispatcher = require("dispatcher")
@@ -37,7 +38,7 @@ local CWNGSync = WidgetContainer:extend{
     name = "cwsync",
     settings_key = "cwngsync", -- reuse upstream configuration/state
     title = _("Login to NextGen Server"),
-    version = "1.0.0",
+    version = "1.0.1",
 
     push_timestamp = nil,
     pull_timestamp = nil,
@@ -229,10 +230,12 @@ function CWNGSync:onReaderReady()
     if self.settings.auto_sync then
         UIManager:nextTick(function()
             self:getProgress(true, false)
-            -- collectDeliveries starts with a fresh inventory report and then
-            -- triggers collection sync, so ordered shelves see existing OPDS
-            -- downloads on the very first CWSync run.
-            self:collectDeliveries(false, false)
+            -- Shelf sync must work against the current stable CWNG server,
+            -- which does not expose the post-4.1.43 device-inventory API.
+            self:syncShelvesFromOpds(false, true)
+            -- Queued-book delivery is a newer server capability and remains a
+            -- manual action. Do not probe its inventory API on every ReaderReady
+            -- against stable servers that correctly answer 405 for that route.
         end)
     end
     -- NOTE: Keep in mind that, on Android, turning on WiFi requires a focus switch, which will trip a Suspend/Resume pair.
@@ -449,9 +452,7 @@ If set to 0, updating progress based on page turns will be disabled.]]),
                     return self.settings.password ~= nil
                 end,
                 callback = function()
-                    self:reportInventory(true, true, function(ok)
-                        if ok then self:syncDeviceCapabilities(true, false) end
-                    end)
+                    self:syncShelvesFromOpds(true, true)
                 end,
                 separator = true,
             },
@@ -1000,9 +1001,15 @@ function CWNGSync:reportInventory(interactive, ensure_networking, on_complete)
             else
                 logger.warn("CWNGSync: device inventory report failed", reason or "unknown error")
                 if interactive then
+                    local message
+                    if tostring(reason or ""):find("405", 1, true) then
+                        message = _("This NextGen server does not support device inventory yet. Shelf sync works without it; queued-book delivery requires a newer NextGen server.")
+                    else
+                        message = T(_("Device library report failed: %1"), reason or _("unknown error"))
+                    end
                     UIManager:show(InfoMessage:new{
-                        text = T(_("Device library report failed: %1"), reason or _("unknown error")),
-                        timeout = 5,
+                        text = message,
+                        timeout = 6,
                     })
                 end
                 if on_complete then on_complete(false, body, reason) end
@@ -1045,11 +1052,14 @@ function CWNGSync:fetchOrderedOpdsShelves(snapshot, client)
     local index = OpdsShelves.parseIndex(xml)
     local shelves = {}
     for _, entry in ipairs(index) do
-        local relevant = false
-        for _, collection in ipairs(snapshot.collections or {}) do
-            if ShelfOrder.namesCompatible(collection.name or "", entry.name or "") then
-                relevant = true
-                break
+        local relevant = type(snapshot) ~= "table"
+            or type(snapshot.collections) ~= "table"
+        if not relevant then
+            for _, collection in ipairs(snapshot.collections or {}) do
+                if ShelfOrder.namesCompatible(collection.name or "", entry.name or "") then
+                    relevant = true
+                    break
+                end
             end
         end
         if relevant then
@@ -1091,17 +1101,7 @@ function CWNGSync:fetchOrderedOpdsShelves(snapshot, client)
     return shelves
 end
 
-function CWNGSync:resolveCollectionBookIds(snapshot, root_path, client, callback)
-    local lpaths, seen = {}, {}
-    for _, collection in ipairs(snapshot.collections or {}) do
-        for _, lpath in ipairs(collection.books or {}) do
-            if type(lpath) == "string" and lpath ~= "" and not seen[lpath] then
-                seen[lpath] = true
-                lpaths[#lpaths + 1] = lpath
-            end
-        end
-    end
-
+function CWNGSync:resolveBookIdsForLpaths(lpaths, root_path, client, callback)
     local cache = G_reader_settings:readSetting(BOOK_ID_CACHE_KEY) or {}
     local resolved = {}
     local index = 1
@@ -1112,6 +1112,16 @@ function CWNGSync:resolveCollectionBookIds(snapshot, root_path, client, callback
             pcall(G_reader_settings.flush, G_reader_settings)
         end
         callback(resolved)
+    end
+
+    local function remember(lpath, checksum, body)
+        local book_id = type(body) == "table" and tonumber(body.calibre_book_id) or nil
+        if book_id then
+            resolved[lpath] = book_id
+            cache[checksum] = book_id
+            return true
+        end
+        return false
     end
 
     local function step()
@@ -1137,22 +1147,43 @@ function CWNGSync:resolveCollectionBookIds(snapshot, root_path, client, callback
             return
         end
 
+        -- Progress GET is the cheapest resolver and carries calibre_book_id when
+        -- a position exists. CWNG 4.1.43 returns an empty object for a matched
+        -- book with no progress, so fall back to the read-only annotations GET:
+        -- it resolves the same checksum and returns calibre_book_id even when
+        -- annotation_count is zero. Neither call writes reading state.
         client:get_progress(
             self.settings.username, self.settings.password, checksum,
-            function(request_ok, body)
-                local book_id = request_ok and type(body) == "table"
-                    and tonumber(body.calibre_book_id) or nil
-                if book_id then
-                    resolved[lpath] = book_id
-                    cache[checksum] = book_id
-                else
-                    logger.warn("CWSync: CWNG could not map collection book", lpath)
+            function(progress_ok, progress_body)
+                if progress_ok and remember(lpath, checksum, progress_body) then
+                    UIManager:nextTick(step)
+                    return
                 end
-                UIManager:nextTick(step)
+                client:pull_annotations(
+                    self.settings.username, self.settings.password, checksum,
+                    function(annotation_ok, annotation_body)
+                        if not (annotation_ok and remember(lpath, checksum, annotation_body)) then
+                            logger.warn("CWSync: CWNG could not map collection book", lpath)
+                        end
+                        UIManager:nextTick(step)
+                    end)
             end)
     end
 
     step()
+end
+
+function CWNGSync:resolveCollectionBookIds(snapshot, root_path, client, callback)
+    local lpaths, seen = {}, {}
+    for _, collection in ipairs(snapshot.collections or {}) do
+        for _, lpath in ipairs(collection.books or {}) do
+            if type(lpath) == "string" and lpath ~= "" and not seen[lpath] then
+                seen[lpath] = true
+                lpaths[#lpaths + 1] = lpath
+            end
+        end
+    end
+    self:resolveBookIdsForLpaths(lpaths, root_path, client, callback)
 end
 
 function CWNGSync:buildOrderedCollectionSnapshot(snapshot, root_path, client, callback)
@@ -1175,6 +1206,99 @@ function CWNGSync:buildOrderedCollectionSnapshot(snapshot, root_path, client, ca
     end)
 end
 
+function CWNGSync:syncShelvesFromOpds(interactive, ensure_networking)
+    if not self.settings.username or not self.settings.password then
+        if interactive then promptLogin() end
+        return
+    end
+    if not ensureServerConfigured(self.settings.server) then return end
+    if ensure_networking and NetworkMgr:willRerunWhenOnline(function()
+            self:syncShelvesFromOpds(interactive, ensure_networking)
+        end) then
+        return
+    end
+
+    local paths, root_path = self:getInventoryBooks()
+    if not root_path then
+        if interactive then
+            UIManager:show(InfoMessage:new{
+                text = _("Choose a device library folder before syncing shelves."),
+                timeout = 4,
+            })
+        end
+        return
+    end
+
+    local lpaths, seen = {}, {}
+    for _, file_path in ipairs(paths) do
+        local lpath = inventoryRelativePath(file_path, root_path)
+        if lpath and not seen[lpath] then
+            seen[lpath] = true
+            lpaths[#lpaths + 1] = lpath
+        end
+    end
+
+    local CWNGSyncClient = require("CWNGSyncClient")
+    local client = CWNGSyncClient:new{
+        service_url = self.settings.server .. "/kosync",
+        service_spec = self.path .. "/api.json",
+    }
+    local shelves, reason = self:fetchOrderedOpdsShelves(nil, client)
+    if not shelves then
+        logger.warn("CWSync: OPDS shelf sync failed", reason or "unknown error")
+        if interactive then
+            UIManager:show(InfoMessage:new{
+                text = T(_("Shelf sync failed: %1"), reason or _("unknown error")),
+                timeout = 5,
+            })
+        end
+        return
+    end
+
+    self:resolveBookIdsForLpaths(lpaths, root_path, client, function(book_ids)
+        local scope = OpdsCollectionSnapshot.accountScope(
+            self.settings.server, self.settings.username)
+        local snapshot, stats = OpdsCollectionSnapshot.build(scope, shelves, book_ids)
+        if not snapshot then
+            if interactive then
+                UIManager:show(InfoMessage:new{
+                    text = _("Shelf sync failed: invalid OPDS snapshot."),
+                    timeout = 5,
+                })
+            end
+            return
+        end
+
+        local ReadCollection = require("readcollection")
+        local state = G_reader_settings:readSetting("cwngsync_collection_state") or {}
+        local applied, apply_reason = DeviceCollections.apply(
+            snapshot, root_path, ReadCollection, state)
+        if not applied then
+            logger.warn("CWSync: collection apply failed", apply_reason or "unknown error")
+            if interactive then
+                UIManager:show(InfoMessage:new{
+                    text = T(_("Shelf sync failed: %1"), apply_reason or _("unknown error")),
+                    timeout = 5,
+                })
+            end
+            return
+        end
+
+        G_reader_settings:saveSetting("cwngsync_collection_state", state)
+        if G_reader_settings.flush then
+            pcall(G_reader_settings.flush, G_reader_settings)
+        end
+        logger.info("CWSync: OPDS shelves applied", stats)
+        if interactive then
+            UIManager:show(InfoMessage:new{
+                text = T(_("Shelves synced: %1 collections, %2 local books matched."),
+                    stats.collections or 0, stats.books or 0),
+                timeout = 5,
+            })
+        end
+    end)
+end
+
 function CWNGSync:syncDeviceCapabilities(interactive, ensure_networking)
     if not self.settings.username or not self.settings.password
             or not ensureServerConfigured(self.settings.server) then
@@ -1194,45 +1318,10 @@ function CWNGSync:syncDeviceCapabilities(interactive, ensure_networking)
     }
 
     local function syncCollections()
-        client:get_collections(
-            self.settings.username, self.settings.password, Device.model, self.device_id,
-            function(ok, snapshot, reason)
-                if not ok or type(snapshot) ~= "table" then
-                    logger.warn("CWNGSync: collection snapshot failed", reason or "unknown error")
-                    return
-                end
-
-                self:buildOrderedCollectionSnapshot(
-                    snapshot, root_path, client,
-                    function(snapshot_to_apply, order_stats)
-                        local ReadCollection = require("readcollection")
-                        local state = G_reader_settings:readSetting("cwngsync_collection_state") or {}
-                        local applied, apply_reason = DeviceCollections.apply(
-                            snapshot_to_apply, root_path, ReadCollection, state)
-                        if not applied then
-                            logger.warn("CWNGSync: collection apply failed",
-                                apply_reason or "unknown error")
-                            return
-                        end
-                        G_reader_settings:saveSetting("cwngsync_collection_state", state)
-                        if G_reader_settings.flush then
-                            pcall(G_reader_settings.flush, G_reader_settings)
-                        end
-                        if order_stats and order_stats.matched and order_stats.matched > 0 then
-                            logger.info("CWSync: applied CWNG manual order to",
-                                order_stats.matched, "collection(s)")
-                        end
-                        client:complete_collections(
-                            self.settings.username, self.settings.password, Device.model,
-                            self.device_id, snapshot.revision,
-                            function(acknowledged, _body, ack_reason)
-                                if not acknowledged then
-                                    logger.warn("CWNGSync: collection acknowledgement failed",
-                                        ack_reason or "unknown error")
-                                end
-                            end)
-                    end)
-            end)
+        -- Shelves no longer depend on the unreleased /syncs/collections API.
+        -- This remains the continuation after newer deletion support, but the
+        -- actual collection source is always OPDS so CWNG 4.1.43 works too.
+        self:syncShelvesFromOpds(interactive, false)
     end
 
     client:claim_deletion(

@@ -20,6 +20,7 @@ jobs:
         working-directory: tests
         run: |
           lua5.1 shelf_order_test.lua
+          lua5.1 opds_collection_snapshot_test.lua
           lua5.1 migration_test.lua
           lua5.1 sync_logic_test.lua
           lua5.1 delivery_test.lua

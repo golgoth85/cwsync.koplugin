@@ -434,15 +434,23 @@ end
 -- supports HTTP Basic/app passwords, so OPDS is the stable source for shelf order.
 function CWNGSyncClient:fetch_opds(username, password, request_url)
     local http = require("socket.http")
+    local https_ok, https = pcall(require, "ssl.https")
     local ltn12 = require("ltn12")
     local mime = require("mime")
     local socket = require("socket")
     local sink = {}
     local credentials = mime.b64(username .. ":" .. password):gsub("%s", "")
+    local transport = http
+    if request_url:match("^https://") then
+        if not https_ok or not https then
+            return nil, "HTTPS support is unavailable"
+        end
+        transport = https
+    end
 
     socketutil:set_timeout(INVENTORY_TIMEOUTS[1], INVENTORY_TIMEOUTS[2])
     local ok, code, headers, status = pcall(function()
-        return socket.skip(1, http.request {
+        return socket.skip(1, transport.request {
             url = request_url,
             method = "GET",
             headers = {

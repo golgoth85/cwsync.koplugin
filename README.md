@@ -1,6 +1,6 @@
 # CWSync for KOReader
 
-CWSync is a standalone fork of Calibre-Web NextGen's `cwngsync.koplugin`.
+CWSync is a standalone derivative of Calibre-Web NextGen's `cwngsync.koplugin`.
 It keeps the upstream synchronization features and adds preservation of the
 manual order of Calibre-Web NextGen shelves when they are materialized as
 native KOReader Collections.
@@ -8,46 +8,61 @@ native KOReader Collections.
 ## What it keeps from cwngsync
 
 - KOReader reading-progress synchronization
-- device inventory
-- queued-book delivery and deletion
 - annotation/highlight synchronization
-- CWNG shelf -> native KOReader Collection synchronization
+- device inventory, queued-book delivery and named deletion when the connected
+  CWNG server exposes those newer capability endpoints
 
 ## What CWSync adds
 
-CWNG already stores a manual `BookShelf.order`, and the CWNG OPDS shelf feed
-already emits books in that order. The KOSync collection snapshot, however,
-currently sorts the local paths alphabetically before sending them to KOReader.
+CWNG already stores a manual `BookShelf.order`, and its OPDS shelf feed emits
+books in that order. CWSync uses that stable OPDS representation directly to
+build native KOReader Collections in manual-sort mode.
 
-CWSync reconciles the two sources:
+Shelf synchronization deliberately does **not** require the newer
+`/kosync/syncs/inventory` or `/kosync/syncs/collections` endpoints. This
+makes the feature work with the current stable CWNG 4.1.43 server as well as
+newer builds.
 
-1. it reports the current KOReader library to CWNG;
-2. it receives the normal KOSync collection snapshot;
-3. it reads the same shelves through CWNG OPDS using the existing Basic/app-password credentials;
-4. for each local file in a shelf it resolves the authoritative
-   `calibre_book_id` through the existing KOSync checksum lookup;
-5. it reorders the snapshot to the OPDS/CWN shelf order;
-6. it creates/rebuilds the native KOReader Collection in manual-sort mode.
+The shelf-sync path is:
 
-No filename prefixes, fake series indexes, copied books, or server patch are
-needed.
+1. scan supported books under the configured KOReader library root;
+2. compute the same partial-MD5 document checksum used by KOSync;
+3. resolve each checksum to its authoritative `calibre_book_id` using
+   read-only KOSync endpoints already shipped by CWNG 4.1.43;
+4. read shelves through CWNG OPDS with the existing Basic/app-password
+   credentials;
+5. map local books to shelf membership in the exact OPDS/CWNG manual order;
+6. create or rebuild the native KOReader Collections with manual sorting.
+
+No filename prefixes, fake series indexes, copied books, re-downloads, or
+server patch are required.
 
 ## Existing OPDS downloads
 
 Existing books are supported. A book does **not** need to have been downloaded
 by CWSync.
 
-On shelf sync, CWSync scans the normal KOReader library through the upstream
-inventory code. CWNG resolves each file by the same checksum mechanism already
-used by KOSync. CWSync then caches `checksum -> calibre_book_id` locally and
-uses that identity to position the existing file in the correct shelf.
+CWSync scans the local KOReader library and first attempts the ordinary KOSync
+progress lookup for checksum-to-book resolution. If a known book has no reading
+progress yet, it falls back to CWNG's read-only annotations endpoint, which
+returns `calibre_book_id` even when that book has zero annotations. Successful
+`checksum -> calibre_book_id` mappings are cached locally.
 
 Files are not renamed, moved, replaced, or re-downloaded. Existing `.sdr`
 sidecars and reading progress are left in place.
 
-If CWNG cannot identify a particular local file by checksum, CWSync leaves that
-file in the Collection but does not guess its position; unresolved items remain
-after the books whose CWNG order is known.
+A local file that CWNG cannot identify by checksum is simply not inserted into
+a CWNG-managed Collection; CWSync does not guess its identity.
+
+## CWNG server compatibility
+
+Shelf synchronization is compatible with **CWNG 4.1.43**.
+
+CWNG's device inventory, queued-book delivery, named deletion, and server-side
+collection snapshot APIs were added to upstream `main` after the 4.1.43
+release. On a 4.1.43 server those newer routes may return HTTP 405. CWSync does
+not use them for shelf synchronization. Queued-book delivery remains available
+as a manual action for servers that implement the newer capability endpoints.
 
 ## Installation / migration from cwngsync
 
@@ -61,39 +76,38 @@ CWSync is a **replacement**, not a companion plugin.
 4. Open **CWSync for Calibre-Web NextGen**.
 5. Existing CWNG settings are reused automatically because CWSync intentionally
    keeps the upstream `cwngsync` settings/state namespace.
-6. Run **Sync CWNG shelves to KOReader Collections now** once if you want an
-   immediate inventory + shelf refresh.
+6. Run **Sync CWNG shelves to KOReader Collections now** for an immediate
+   shelf refresh.
 
 CWSync refuses to start while `cwngsync.koplugin` or `cwasync.koplugin` is
-still installed, preventing duplicate progress/inventory/collection operations.
+still installed, preventing duplicate synchronization operations.
 
 ## Source of truth
 
 For shelf membership and order, Calibre-Web NextGen is the source of truth.
-Each sync rebuilds the managed KOReader Collection from the server state.
-Local manual reordering of a CWSync-managed Collection can therefore be
+Each shelf sync rebuilds the managed KOReader Collection from the current OPDS
+state. Local manual reordering of a CWSync-managed Collection can therefore be
 overwritten by the next sync.
 
-Only local books that CWNG reports as members of a shelf are included. A book
+Only locally present books whose checksum CWNG can resolve are inserted. A book
 may belong to multiple Collections without duplicating the underlying file.
-
-## Ambiguous shelves
-
-The KOSync collection snapshot identifies a shelf by CWNG UUID, while OPDS
-addresses it by numeric shelf ID. CWSync matches the two conservatively using
-the shelf name plus the set of locally resolved CWNG book IDs. If duplicate
-shelf names remain ambiguous, CWSync does not guess and falls back to the
-ordinary server-provided order for that shelf.
+Shelves removed from CWNG are removed from the set of CWSync-managed
+Collections on the next successful sync.
 
 ## Upstream
 
-Current baseline:
+The initial imported plugin code came from:
 
-- Calibre-Web NextGen plugin: `cwngsync.koplugin` 4.1.43
+- Calibre-Web NextGen plugin reporting version 4.1.43
 - upstream commit: `097bb78f954739f76c888d50bf9033c5a2f17871`
 - upstream subtree: `koreader/plugins/cwngsync.koplugin/`
 
-See [UPSTREAM.md](UPSTREAM.md) for the intentionally small CWSync delta.
+That upstream commit was on `main` after the released 4.1.43 server commit and
+already contained newer device-capability APIs. CWSync 1.0.1 explicitly removes
+those unreleased APIs from the shelf-sync dependency chain so it interoperates
+with the actual 4.1.43 release.
+
+See [UPSTREAM.md](UPSTREAM.md) for the CWSync delta.
 
 ## License
 
