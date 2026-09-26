@@ -59,7 +59,7 @@ jobs:
             exit 1
           fi
 
-      - name: Create GitHub release
+      - name: Publish new release or verify existing one
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.version.outputs.tag }}
@@ -68,8 +68,12 @@ jobs:
         run: |
           set -euo pipefail
           if gh release view "$TAG" >/dev/null 2>&1; then
-            echo "Release $TAG already exists; refreshing notes from CHANGELOG.md."
-            gh release edit "$TAG" --notes-file RELEASE_NOTES.md
+            asset_count="$(
+              gh release view "$TAG" --json assets \
+                --jq '[.assets[] | select(.name == "cwsync.koplugin.zip")] | length'
+            )"
+            test "$asset_count" = "1"
+            echo "Release $TAG already exists with the expected asset; no mutation."
             exit 0
           fi
           gh release create "$TAG" dist/cwsync.koplugin.zip \

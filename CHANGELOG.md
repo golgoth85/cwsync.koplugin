@@ -190,7 +190,8 @@ and CWSync uses semantic versioning for its own releases.
 Both issues were fixed in 1.0.1, with the remaining automatic inventory probe
 removed in 1.0.2.
 
-[Unreleased]: https://github.com/golgoth85/cwsync.koplugin/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/golgoth85/cwsync.koplugin/compare/v1.1.1...HEAD
+[1.1.1]: https://github.com/golgoth85/cwsync.koplugin/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/golgoth85/cwsync.koplugin/compare/v1.0.3...v1.1.0
 [1.0.3]: https://github.com/golgoth85/cwsync.koplugin/compare/v1.0.2...v1.0.3
 [1.0.2]: https://github.com/golgoth85/cwsync.koplugin/compare/v1.0.1...v1.0.2
