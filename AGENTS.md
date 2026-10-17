@@ -16,5 +16,12 @@ Plugin KOReader derivato da `cwngsync.koplugin` di Calibre-Web NextGen (CWNG). M
 - Sviluppo su branch e PR; mantenere isolate le modifiche proprie rispetto all'upstream per facilitare gli aggiornamenti.
 - Local CI: profilo `profile-pending` (vedi `LOCAL_CI.md`), facoltativa e non bloccante; nessuna CI GitHub-hosted automatica. Il codice non attendibile non gira su runner persistenti con credenziali. Regime semplificato del 2026-10-17: vedi «Deploy e controlli» in `/workspace/AGENTS.md`.
 
+## Zone delicate
+
+Toccare queste parti **non** si annulla con un semplice revert: prima backup o prova su una copia; se non basta, PR e review consigliata al proprietario (regola «Quanto rigore» in `/workspace/AGENTS.md`). Tutto il resto: si va dritti.
+- Sincronizzazione di progressi e annotazioni, consegna e cancellazione di libri sul dispositivo (`delivery.lua`, `migration.lua`): agisce sul dispositivo e sul server reali.
+- Pubblicazione di una release (la scaricano i dispositivi).
+- Separazione dal codice upstream di CWNG (`UPSTREAM.md`): mescolarli rende difficili gli aggiornamenti futuri.
+
 ## Documenti
 `README.md`, `CHANGELOG.md`, `UPSTREAM.md`, `ROADMAP.md`, `LOCAL_CI.md`.
