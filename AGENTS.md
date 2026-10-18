@@ -1,6 +1,6 @@
 # CWSync
 
-Contesto generale (infrastruttura, GitHub, regole operative): `/workspace/AGENTS.md`. Ambiente di sviluppo e collaudo headless: repo `koreader` (`/workspace/koreader-source`).
+Regole generali (infrastruttura, GitHub, deploy, zone delicate): `/workspace/AGENTS.md`. Ambiente di sviluppo e collaudo headless: repo `koreader` (`/workspace/koreader-source`).
 
 ## Scopo
 Plugin KOReader derivato da `cwngsync.koplugin` di Calibre-Web NextGen (CWNG). Mantiene la sincronizzazione di progressi di lettura, annotazioni e inventario/consegna/cancellazione di libri, e aggiunge la **conservazione dell'ordine manuale** degli scaffali CWNG quando diventano Collezioni native di KOReader. È un sostituto di `cwngsync`, non un plugin affiancato.
@@ -14,11 +14,9 @@ Plugin KOReader derivato da `cwngsync.koplugin` di Calibre-Web NextGen (CWNG). M
 
 ## Regole
 - Sviluppo su branch e PR; mantenere isolate le modifiche proprie rispetto all'upstream per facilitare gli aggiornamenti.
-- Local CI: profilo `profile-pending` (vedi `LOCAL_CI.md`), facoltativa e non bloccante; nessuna CI GitHub-hosted automatica. Il codice non attendibile non gira su runner persistenti con credenziali. Regime semplificato del 2026-10-17: vedi «Deploy e controlli» in `/workspace/AGENTS.md`.
+- Local CI: profilo `profile-pending` (vedi `LOCAL_CI.md`), facoltativa e non bloccante; nessuna CI GitHub-hosted automatica. Il codice non attendibile non gira su runner persistenti con credenziali.
 
 ## Zone delicate
-
-Toccare queste parti **non** si annulla con un semplice revert: prima backup o prova su una copia; se non basta, PR e review consigliata al proprietario (regola «Quanto rigore» in `/workspace/AGENTS.md`). Tutto il resto: si va dritti.
 - Sincronizzazione di progressi e annotazioni, consegna e cancellazione di libri sul dispositivo (`delivery.lua`, `migration.lua`): agisce sul dispositivo e sul server reali.
 - Pubblicazione di una release (la scaricano i dispositivi).
 - Separazione dal codice upstream di CWNG (`UPSTREAM.md`): mescolarli rende difficili gli aggiornamenti futuri.
