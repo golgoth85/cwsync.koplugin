@@ -7,7 +7,7 @@ Ultimo aggiornamento: 2026-10-15 (fase: manutenzione; versione `1.1.1`). Nessun 
 
 ## Prossimo
 - [ ] Verificare la compatibilità con il CWNG in esecuzione sul NAS (`calibre-web-nextgen`, immagine `latest`) rispetto alla baseline `4.1.43`, e aggiornare `UPSTREAM.md` se l'upstream è cambiato.
-- [ ] Completare il profilo Local CI (oggi `profile-pending`) e decidere dove far girare i test Lua.
+- [ ] Decidere dove far girare i test Lua.
 
 ## Più avanti
 - [ ] Valutare gli endpoint più recenti (`inventory`, `collections`) del server come ottimizzazione opzionale.
